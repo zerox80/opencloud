@@ -1205,6 +1205,57 @@ var _ = Describe("Users", func() {
 			})
 		})
 
+		Describe("PatchMe", func() {
+			var user *libregraph.User
+
+			BeforeEach(func() {
+				user = libregraph.NewUser("Display Name", "user")
+				user.SetId(currentUser.GetId().GetOpaqueId())
+				identityBackend.On("GetUser", mock.Anything, user.GetId(), mock.Anything).Return(user, nil)
+				valueService.On("GetValueByUniqueIdentifiers", mock.Anything, mock.Anything, mock.Anything).
+					Return(&settings.GetValueResponse{}, nil)
+			})
+
+			DescribeTable("rejects password profiles before applying any changes",
+				func(body string) {
+					identityBackend.On("UpdateUser", mock.Anything, mock.Anything, mock.Anything).Return(user, nil)
+					valueService.On("SaveValue", mock.Anything, mock.Anything, mock.Anything).
+						Return(&settings.SaveValueResponse{}, nil)
+
+					r := httptest.NewRequest(http.MethodPatch, "/graph/v1.0/me", bytes.NewBufferString(body))
+					r = r.WithContext(revactx.ContextSetUser(ctx, currentUser))
+					svc.ServeHTTP(rr, r)
+
+					Expect(rr.Code).To(Equal(http.StatusBadRequest))
+					Expect(rr.Body.String()).To(ContainSubstring("changePassword"))
+					identityBackend.AssertNotCalled(GinkgoT(), "UpdateUser", mock.Anything, mock.Anything, mock.Anything)
+					valueService.AssertNotCalled(GinkgoT(), "SaveValue", mock.Anything, mock.Anything, mock.Anything)
+				},
+				Entry("password only", `{"passwordProfile":{"password":"newpassword"}}`),
+				Entry("password and preferred language", `{"passwordProfile":{"password":"newpassword"},"preferredLanguage":"de"}`),
+				Entry("empty password profile", `{"passwordProfile":{}}`),
+			)
+
+			It("still updates the preferred language", func() {
+				valueService.On("SaveValue", mock.Anything, mock.MatchedBy(func(req *settings.SaveValueRequest) bool {
+					values := req.GetValue().GetListValue().GetValues()
+					return req.GetValue().GetAccountUuid() == user.GetId() &&
+						len(values) == 1 && values[0].GetStringValue() == "de"
+				}), mock.Anything).Return(&settings.SaveValueResponse{}, nil).Once()
+
+				r := httptest.NewRequest(http.MethodPatch, "/graph/v1.0/me", bytes.NewBufferString(`{"preferredLanguage":"de"}`))
+				r = r.WithContext(revactx.ContextSetUser(ctx, currentUser))
+				svc.ServeHTTP(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				var updatedUser libregraph.User
+				Expect(json.Unmarshal(rr.Body.Bytes(), &updatedUser)).To(Succeed())
+				Expect(updatedUser.GetPreferredLanguage()).To(Equal("de"))
+				valueService.AssertExpectations(GinkgoT())
+				identityBackend.AssertNotCalled(GinkgoT(), "UpdateUser", mock.Anything, mock.Anything, mock.Anything)
+			})
+		})
+
 		Describe("PatchUser", func() {
 			var (
 				user                      *libregraph.User
@@ -1285,6 +1336,25 @@ var _ = Describe("Users", func() {
 				svc.PatchUser(rr, r)
 
 				Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			})
+
+			It("still allows password resets through the user update handler", func() {
+				passwordProfile := libregraph.NewPasswordProfile()
+				passwordProfile.SetPassword("newpassword")
+				userUpdate.SetPasswordProfile(*passwordProfile)
+				identityBackend.On("UpdateUser", mock.Anything, user.GetId(), *userUpdate).
+					Return(expectedUser, nil).Once()
+
+				data, err := json.Marshal(userUpdate)
+				Expect(err).ToNot(HaveOccurred())
+				r := httptest.NewRequest(http.MethodPatch, "/graph/v1.0/users/{userid}", bytes.NewBuffer(data))
+				rctx := chi.NewRouteContext()
+				rctx.URLParams.Add("userID", user.GetId())
+				r = r.WithContext(context.WithValue(revactx.ContextSetUser(ctx, currentUser), chi.RouteCtxKey, rctx))
+				svc.PatchUser(rr, r)
+
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				identityBackend.AssertExpectations(GinkgoT())
 			})
 
 			It("updates attributes", func() {

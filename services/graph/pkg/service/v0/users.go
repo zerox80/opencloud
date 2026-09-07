@@ -842,6 +842,12 @@ func (g Graph) PatchMe(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("invalid request body: %s", err.Error()))
 		return
 	}
+	// Own password changes must verify the current password through ChangeOwnPassword.
+	if changes.HasPasswordProfile() {
+		errorcode.InvalidRequest.Render(w, r, http.StatusBadRequest,
+			"password changes must use the /me/changePassword endpoint")
+		return
+	}
 	if _, ok := changes.GetDisplayNameOk(); ok {
 		logger.Info().Interface("user", changes).Msg("could not update user: user is not allowed to change own displayname")
 		errorcode.InvalidRequest.Render(w, r, http.StatusBadRequest, "user is not allowed to change own displayname")
